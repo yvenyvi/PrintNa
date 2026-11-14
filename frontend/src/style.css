@@ -161,6 +161,9 @@ h1 { font-size: 14px; letter-spacing: -0.01em; }
   background: var(--accent); border: 2px solid white; cursor: nwse-resize;
 }
 .page-picker { margin-top: 9px; }
+.editor-options { margin-block: 8px; border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; }
+.editor-options summary { cursor: pointer; color: var(--accent); font-size: 13px; font-weight: 650; }
+.editor-options .page-picker + .choices { margin-top: 6px; }
 .preview-note { text-align: center; font-size: 13px; }
 .crop-dialog { width: min(90vw, 600px); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
 .crop-dialog::backdrop { background: #192d3b99; }

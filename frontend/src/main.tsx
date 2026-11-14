@@ -445,7 +445,21 @@ function App() {
         </section>
         {selected && <section className="image-editor">
           <h2>Edit image</h2>
-          <button className="sheet-select" onClick={() => setCropping(true)}>Crop image</button>
+          <div className="choices">
+            <button onClick={() => setCropping(true)}>Crop</button>
+            <button onClick={() => {
+              const scale = Math.min(1, selectedSize.width / selected.height, selectedSize.height / selected.width)
+              const rotatedWidth = selected.height * scale
+              const rotatedHeight = selected.width * scale
+              changeItem(selected, {
+                angle: (selected.angle + 90) % 360, width: rotatedWidth, height: rotatedHeight,
+                left: selected.left + (selected.width - rotatedWidth) / 2,
+                top: selected.top + (selected.height - rotatedHeight) / 2,
+              })
+            }}>Rotate 90°</button>
+            <button onClick={() => duplicatePhoto(selected)}>Duplicate</button>
+            <button onClick={() => removePhoto(selected.photo)}>Delete image</button>
+          </div>
           {cropping && <CropEditor key={selected.id} url={selected.photo.url} crop={selected.photo.cropped?.crop}
             onClose={() => setCropping(false)} onApply={cropped => {
               const previous = selected.photo.cropped ?? selected.photo
@@ -460,6 +474,8 @@ function App() {
               setPhotos(photosRef.current)
               setCropping(false)
             }} />}
+          <details className="editor-options">
+            <summary>Color</summary>
           <label className="page-picker">Image color
             <select disabled={activeSheetIsGrayscale}
               value={activeSheetIsGrayscale || selected.photo.grayscale ? 'grayscale' : 'color'} onChange={event => {
@@ -474,6 +490,9 @@ function App() {
             </select>
           </label>
           {activeSheetIsGrayscale && <p className="hint">This sheet prints in black and white.</p>}
+          </details>
+          <details className="editor-options">
+            <summary>Size and position</summary>
           <label className="size-toggle page-picker">
             <input type="checkbox" checked={selected.photo.keepProportions !== false} onChange={event => {
               const keepProportions = event.target.checked
@@ -487,7 +506,7 @@ function App() {
           <div className="field-row">
             {([
               ['Width', 'width'], ['Height', 'height'],
-              ['From left', 'left'], ['From top', 'top'],
+              ['Distance from left', 'left'], ['Distance from top', 'top'],
             ] as const).map(([label, field]) => <label key={field}>{label} ({unit})
               <input key={`${selected.id}:${unit}:${selected[field]}`} type="number" step="any" min={0}
                 defaultValue={displaySize(selected[field], unit)}
@@ -519,22 +538,12 @@ function App() {
             </select>
           </label>
           <div className="choices">
-            <button onClick={() => duplicatePhoto(selected)}>Duplicate image</button>
             <button onClick={() => changeItem(selected, { left: (selectedSize.width - selected.width) / 2, top: (selectedSize.height - selected.height) / 2 })}>Center on sheet</button>
             <button onClick={() => changeItem(selected, { left: (selectedSize.width - selected.width) / 2 })}>Center horizontally</button>
             <button onClick={() => changeItem(selected, { top: (selectedSize.height - selected.height) / 2 })}>Center vertically</button>
-            <button onClick={() => {
-              const scale = Math.min(1, selectedSize.width / selected.height, selectedSize.height / selected.width)
-              const rotatedWidth = selected.height * scale
-              const rotatedHeight = selected.width * scale
-              changeItem(selected, {
-                angle: (selected.angle + 90) % 360, width: rotatedWidth, height: rotatedHeight,
-                left: selected.left + (selected.width - rotatedWidth) / 2,
-                top: selected.top + (selected.height - rotatedHeight) / 2,
-              })
-            }}>Rotate 90°</button>
-            <button onClick={() => setEdits(({ [selected.id]: removed, ...others }) => others)}>Reset image</button>
+            <button onClick={() => setEdits(({ [selected.id]: removed, ...others }) => others)}>Reset placement</button>
           </div>
+          </details>
         </section>}
         <section>
           <h2>Images</h2>
@@ -546,7 +555,13 @@ function App() {
                 event.target.value = ''
               }} />
           </label>
-          {activePage !== undefined && pages[activePage] && <label className="page-picker">
+          {fileError && <p className="error" role="alert">{fileError}</p>}
+        </section>
+        <section>
+          <h2>Layout</h2>
+          {activePage !== undefined && pages[activePage] && <details className="editor-options">
+          <summary>Arrange sheet {activePage + 1}</summary>
+          <label className="page-picker">
             Sheet {activePage + 1} color
             <select value={activeSheetIsGrayscale ? 'grayscale' : 'color'} onChange={event => {
               const grayscale = event.target.value === 'grayscale'
@@ -555,16 +570,12 @@ function App() {
               <option value="color">Color</option>
               <option value="grayscale">Black and white</option>
             </select>
-          </label>}
-          {activePage !== undefined && pages[activePage] && <div className="page-picker choices">
+          </label>
+          <div className="page-picker choices">
             <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'evenly')}>Distribute evenly</button>
-            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'horizontal')}>Distribute horizontally</button>
-            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'vertical')}>Distribute vertically</button>
-          </div>}
-          {fileError && <p className="error" role="alert">{fileError}</p>}
-        </section>
-        <section>
-          <h2>Layout</h2>
+            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'horizontal')}>Arrange in a row</button>
+            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'vertical')}>Stack vertically</button>
+          </div></details>}
           <label>{selectedSheet === undefined ? 'Default images per sheet' : `Images on sheet ${selectedSheet + 1}`}
             <select value={selectedSheet === undefined ? perSheet : capacity(selectedSheet)} onChange={event => {
               const count = Number(event.target.value)
