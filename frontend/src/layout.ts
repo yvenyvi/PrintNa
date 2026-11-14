@@ -38,6 +38,26 @@ export function fitImageToPaper(width: number, height: number, availableWidth: n
   return { width: width * scale, height: height * scale, scaledDown: scale < 1 }
 }
 
+export function findImageSpace(
+  image: { width: number; height: number },
+  placed: { left: number; top: number; width: number; height: number }[],
+  paper: { width: number; height: number }, edge: number, gap: number,
+) {
+  const epsilon = 1e-7
+  const lefts = [edge, ...placed.map(item => item.left + item.width + gap)].sort((a, b) => a - b)
+  const tops = [edge, ...placed.map(item => item.top + item.height + gap)].sort((a, b) => a - b)
+  for (const top of tops) {
+    if (top + image.height > paper.height - edge + epsilon) break
+    for (const left of lefts) {
+      if (left + image.width > paper.width - edge + epsilon) break
+      if (placed.every(item => left + image.width + gap <= item.left + epsilon ||
+        item.left + item.width + gap <= left + epsilon || top + image.height + gap <= item.top + epsilon ||
+        item.top + item.height + gap <= top + epsilon)) return { left, top }
+    }
+  }
+  return null
+}
+
 export function proportionalSize(
   image: { width: number; height: number },
   axis: 'width' | 'height',

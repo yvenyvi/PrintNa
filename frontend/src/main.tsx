@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
-import { distributeImages, fitImageToPaper, groupBySheet, papers, proportionalSize, spaceAtCurrentSize } from './layout'
+import { distributeImages, findImageSpace, fitImageToPaper, papers, proportionalSize, spaceAtCurrentSize } from './layout'
 import { CropEditor } from './crop'
 import type { Crop } from './crop'
 import './style.css'
@@ -65,7 +65,7 @@ function inRange(value: string, min: number, max: number) {
 }
 
 function App() {
-  const [perSheet, setPerSheet] = useState(1)
+  const [perSheet, setPerSheet] = useState(0)
   const [arrangeError, setArrangeError] = useState('')
   const [sheetCapacities, setSheetCapacities] = useState<Record<number, number>>({})
   const [setExactSize, setSetExactSize] = useState(false)
@@ -152,15 +152,10 @@ function App() {
     const copy = { ...photo, id: String(nextPhotoId.current++) }
     const index = photosRef.current.indexOf(photo) + 1
     photosRef.current = [...photosRef.current.slice(0, index), copy, ...photosRef.current.slice(index)]
-    const page = groupBySheet(photosRef.current, capacity).findIndex(sheet => sheet.includes(copy))
-    const offset = page === item.page ? 5 : 0
-    const dimensions = sheetSize(page)
     setEdits(previous => ({
       ...previous,
       [item.id]: { left, top, width, height, angle, page: item.page, exactSize },
-      [copy.id]: keepOnSheet({
-        left: left + offset, top: top + offset, width, height, angle, page, exactSize,
-      }, dimensions.width, dimensions.height),
+      [copy.id]: { left: -1, top: -1, width, height, angle, page: item.page, exactSize },
     }))
     setPhotos(photosRef.current)
     setSelectedId(copy.id)
@@ -172,91 +167,70 @@ function App() {
     : papers[Number(paper)]
   const short = Math.min(size.width, size.height)
   const long = Math.max(size.width, size.height)
+  const configuredPageCount = Math.max(1, ...[sheetCapacities, sheetOrientations, sheetGrayscale]
+    .flatMap(settings => Object.keys(settings).map(page => Number(page) + 1)))
+  function sheetSetting<T>(settings: Record<number, T>, page: number, fallback: T): T {
+    const last = Object.keys(settings).reduce((previous, key) => {
+      const index = Number(key)
+      return index <= page ? Math.max(previous, index) : previous
+    }, -1)
+    return settings[last] ?? fallback
+  }
+  const capacity = (page: number) => sheetSetting(sheetCapacities, page, perSheet)
+  const directionFor = (page: number) => sheetSetting(sheetOrientations, page, orientation)
+  const grayscaleFor = (page: number) => sheetSetting(sheetGrayscale, page, false)
   function sheetSize(page: number) {
-    const direction = sheetOrientations[page] ?? orientation
-    return direction === 'portrait' ? { width: short, height: long } : { width: long, height: short }
+    return directionFor(page) === 'portrait' ? { width: short, height: long } : { width: long, height: short }
   }
   const { width, height } = sheetSize(selectedSheet ?? 0)
-  const capacity = (page: number) => sheetCapacities[page] ?? perSheet
-  const groupedPhotos = groupBySheet(photos, capacity)
-  const allowsExactSize = perSheet === 1 || (selectedSheet !== undefined && capacity(selectedSheet) === 1) ||
-    groupedPhotos.some((_, page) => capacity(page) === 1)
-  const exactSize = allowsExactSize && setExactSize
+  const exactSize = setExactSize
   const settingsValid = (paper !== 'custom' || customValid) &&
     inRange(margin, 0, 100) && inRange(gap, 0, 100) &&
     (!exactSize || (inRange(photoWidth, 2.54, 609.6) && inRange(photoHeight, 2.54, 609.6)))
   const edge = Number(margin)
   const space = Number(gap)
-  const imageWidth = Number(photoWidth)
-  const imageHeight = Number(photoHeight)
-  function arrangeSheet(sheet: Photo[], page: number) {
-  const mode = capacity(page) === 1 ? 'single' : 'together'
-  const exactSize = mode === 'single' && setExactSize
-  const gridSide = Math.ceil(Math.sqrt(sheet.length))
-  const gridOther = Math.ceil(sheet.length / gridSide)
-  const { width, height } = sheetSize(page)
-  const sideBySide = (sheetOrientations[page] ?? orientation) === 'landscape'
-  const availableWidth = width - 2 * edge
-  const availableHeight = height - 2 * edge
-  const columns = sideBySide ? gridSide : gridOther
-  const rows = sideBySide ? gridOther : gridSide
-  const cellWidth = (availableWidth - (columns - 1) * space) / Math.max(1, columns)
-  const cellHeight = (availableHeight - (rows - 1) * space) / Math.max(1, rows)
-  const fits = availableWidth > 0 && availableHeight > 0 &&
-    (mode !== 'together' || (cellWidth > 0 && cellHeight > 0)) &&
-    (!exactSize || (imageWidth <= availableWidth && imageHeight <= availableHeight))
-  if (!settingsValid || !fits) return []
-  return mode === 'together' ? sheet.map((photo, index) => {
-      const row = Math.floor(index / columns)
-      const column = index % columns
-      const imagesInRow = Math.min(columns, sheet.length - row * columns)
-      const rowWidth = imagesInRow * cellWidth + (imagesInRow - 1) * space
-      const usedRows = Math.ceil(sheet.length / columns)
-      const gridHeight = usedRows * cellHeight + (usedRows - 1) * space
-      const scale = Math.min(cellWidth / photo.width, cellHeight / photo.height)
-      const itemWidth = photo.width * scale
-      const itemHeight = photo.height * scale
-      return {
-        photo, width: itemWidth, height: itemHeight, exactSize,
-        left: (width - rowWidth) / 2 + column * (cellWidth + space) + (cellWidth - itemWidth) / 2,
-        top: (height - gridHeight) / 2 + row * (cellHeight + space) + (cellHeight - itemHeight) / 2,
+  const pages: Item[][] = []
+  let fits = true
+  let currentPage = 0
+  if (settingsValid) for (const photo of photos) {
+    const edit = edits[photo.id]
+    let page = edit ? edit.page : currentPage
+    for (;;) {
+      const paper = sheetSize(page)
+      const useExactSize = edit?.exactSize ?? exactSize
+      const source = photo.cropped ?? photo
+      const dimensions = edit ?? (useExactSize ? { width: Number(photoWidth), height: Number(photoHeight) }
+        : fitImageToPaper(source.width * millimetersPerImagePixel, source.height * millimetersPerImagePixel,
+          paper.width - 2 * edge, paper.height - 2 * edge))
+      if (!dimensions || dimensions.width > paper.width - 2 * edge + 1e-7 ||
+        dimensions.height > paper.height - 2 * edge + 1e-7) {
+        fits = false
+        break
       }
-    })
-    : sheet.flatMap(photo => {
-      const originalWidth = photo.width * millimetersPerImagePixel
-      const originalHeight = photo.height * millimetersPerImagePixel
-      const fitted = fitImageToPaper(originalWidth, originalHeight, availableWidth, availableHeight)
-      if (!fitted) return []
-      const itemWidth = exactSize ? imageWidth : fitted.width
-      const itemHeight = exactSize ? imageHeight : fitted.height
-      return [{ photo, width: itemWidth, height: itemHeight, exactSize,
-        left: (width - itemWidth) / 2, top: (height - itemHeight) / 2 }]
-    })
+      const sheet = pages[page] ?? []
+      const limit = capacity(page)
+      const position = !limit || sheet.length < limit
+        ? (edit && edit.left >= 0 && page === edit.page
+          ? keepOnSheet(edit, paper.width, paper.height, edge)
+          : findImageSpace(dimensions, sheet, paper, edge, space))
+        : null
+      if (position) {
+        sheet.push({ id: photo.id, photo, page, exactSize: useExactSize, angle: edit?.angle ?? 0,
+          width: dimensions.width, height: dimensions.height, left: position.left, top: position.top })
+        pages[page] = sheet
+        if (!edit) currentPage = page
+        break
+      }
+      page++
+    }
   }
-  const automaticPages = groupedPhotos.map(arrangeSheet)
-  const fits = automaticPages.every(sheet => sheet.length > 0)
-  const configuredPageCount = Math.max(1, ...Object.keys(sheetCapacities).map(page => Number(page) + 1))
-  const pageCount = Math.max(configuredPageCount, Math.max(1, automaticPages.length) + extraPages)
-  const pages: Item[][] = Array.from({ length: pageCount }, () => [])
-  if (fits) automaticPages.forEach((sheet, page) => sheet.forEach(slot => {
-    const id = slot.photo.id
-    const change = edits[id]
-    const target = Math.min(change?.page ?? page, pageCount - 1)
-    const dimensions = sheetSize(target)
-    const fitted = change && fitImageToPaper(change.width, change.height, dimensions.width, dimensions.height)
-    const placement = change
-      ? keepOnSheet({
-        ...change, page: target,
-        width: fitted ? fitted.width : change.width,
-        height: fitted ? fitted.height : change.height,
-      }, dimensions.width, dimensions.height, edge)
-      : { ...slot, page, angle: 0 }
-    pages[placement.page].push({ ...placement, id, photo: slot.photo, exactSize: change?.exactSize ?? slot.exactSize })
-  }))
+  const automaticCount = Math.max(1, pages.length)
+  const pageCount = Math.max(configuredPageCount, automaticCount, extraPages)
+  for (let page = 0; page < pageCount; page++) pages[page] ??= []
   const selected = pages.flat().find(item => item.id === selectedId)
   const selectedSize = sheetSize(selected?.page ?? 0)
   const printablePages = pages.filter(sheet => sheet.length > 0)
-  const canPrint = printablePages.length > 0
+  const canPrint = settingsValid && fits && printablePages.length > 0
   const print = () => window.print()
   const [printerSettings, setPrinterSettings] = useState<(() => Promise<void>) | undefined>()
   const [printError, setPrintError] = useState('')
@@ -273,7 +247,7 @@ function App() {
   }, [])
 
   function addPage() {
-    setExtraPages(pageCount + 1 - Math.max(1, automaticPages.length))
+    setExtraPages(pageCount + 1)
     setSelectedSheet(pageCount)
     requestAnimationFrame(() => {
       stage.current?.querySelector(`[data-sheet="${pageCount}"]`)
@@ -285,7 +259,8 @@ function App() {
   const removablePage = activePage ?? (pageCount === 1 ? 0 : undefined)
   const canRemoveSheet = fits && removablePage !== undefined && Boolean(pages[removablePage]) &&
     (pageCount > 1 || pages[removablePage].length > 0)
-  const activeSheetIsGrayscale = activePage !== undefined && Boolean(sheetGrayscale[activePage])
+  const activeSheetIsGrayscale = activePage !== undefined && grayscaleFor(activePage)
+  const imageLimit = activePage === undefined ? perSheet : capacity(activePage)
 
   function distributeOnSheet(page: number, direction: 'horizontal' | 'vertical' | 'evenly' | 'keep-size') {
     setArrangeError('')
@@ -321,21 +296,8 @@ function App() {
   }
 
   function changeCapacity(count: number) {
-    const nextDefault = selectedSheet === undefined ? count : perSheet
-    const nextOverrides = selectedSheet === undefined ? sheetCapacities : { ...sheetCapacities, [selectedSheet]: count }
-    const newGroups = groupBySheet(photos, page => nextOverrides[page] ?? nextDefault)
-    const newPages = new Map(newGroups.flatMap((sheet, page) => sheet.map(photo => [photo.id, page] as const)))
-    setEdits(previous => {
-      const updated = { ...previous }
-      groupedPhotos.forEach((sheet, page) => sheet.forEach(({ id }) => {
-        const edit = previous[id]
-        const newPage = newPages.get(id)
-        if (edit?.page === page && newPage !== undefined) updated[id] = { ...edit, page: newPage }
-      }))
-      return updated
-    })
-    setPerSheet(nextDefault)
-    setSheetCapacities(nextOverrides)
+    if (activePage === undefined) setPerSheet(count)
+    else setSheetCapacities(previous => ({ ...previous, [activePage]: count }))
     setArrangeError('')
   }
 
@@ -379,8 +341,7 @@ function App() {
     setSheetCapacities(capacities)
     setSheetOrientations(reindex(sheetOrientations))
     setSheetGrayscale(reindex(sheetGrayscale))
-    const automaticCount = groupBySheet(remaining, index => capacities[index] ?? perSheet).length
-    setExtraPages(Math.max(0, pageCount - 1 - Math.max(1, automaticCount)))
+    setExtraPages(Math.max(1, pageCount - 1))
     setEdits(Object.fromEntries(pages.flat().filter(item => !removeIds.has(item.id)).map(item => {
       const { id, left, top, width, height, angle } = item
       return [id, { left, top, width, height, angle, exactSize: edits[id]?.exactSize, page: item.page > page ? item.page - 1 : item.page }]
@@ -621,20 +582,24 @@ function App() {
             <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'horizontal')}>Arrange in a row</button>
             <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'vertical')}>Stack vertically</button>
           </div></details>}
-          <label>{selectedSheet === undefined ? 'Default images per sheet' : `Images on sheet ${selectedSheet + 1}`}
-            <input key={`${selectedSheet}:${selectedSheet === undefined ? perSheet : capacity(selectedSheet)}`}
+          <label className="size-toggle">
+            <input type="checkbox" checked={imageLimit > 0} onChange={event => changeCapacity(event.target.checked ? 8 : 0)} />
+            {activePage === undefined ? 'Limit images per sheet' : `Limit images on sheet ${activePage + 1}`}
+          </label>
+          {imageLimit > 0 && <label>Maximum images
+            <input key={`${activePage}:${imageLimit}`}
               type="number" min={1} step={1}
-              defaultValue={selectedSheet === undefined ? perSheet : capacity(selectedSheet)}
+              defaultValue={imageLimit}
               onBlur={event => {
                 const count = event.currentTarget.valueAsNumber
                 if (!Number.isSafeInteger(count) || count < 1) {
-                  event.currentTarget.value = String(selectedSheet === undefined ? perSheet : capacity(selectedSheet))
+                  event.currentTarget.value = String(imageLimit)
                   return
                 }
                 changeCapacity(count)
               }}
               onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
-          </label>
+          </label>}
           {printablePages.length > 1 && <button className="sheet-select" onClick={spaceAllSheets}>Space all sheets · Keep size</button>}
           {arrangeError && <p className="error" role="alert">{arrangeError}</p>}
         </section>
@@ -652,7 +617,7 @@ function App() {
             <h2>{selectedSheet === undefined ? 'Default orientation' : `Sheet ${selectedSheet + 1} orientation`}</h2>
             <div className="choices" aria-label="Paper orientation">
               {(['portrait', 'landscape'] as const).map(direction => <button key={direction}
-                aria-pressed={(selectedSheet === undefined ? orientation : sheetOrientations[selectedSheet] ?? orientation) === direction}
+                aria-pressed={(selectedSheet === undefined ? orientation : directionFor(selectedSheet)) === direction}
                 onClick={() => selectedSheet === undefined ? setOrientation(direction)
                   : setSheetOrientations(previous => ({ ...previous, [selectedSheet]: direction }))}>
                 {direction === 'portrait' ? 'Portrait' : 'Landscape'}
@@ -661,7 +626,7 @@ function App() {
             {selectedSheet !== undefined && <button className="sheet-select" onClick={() => setSelectedSheet(undefined)}>Back to default settings</button>}
           </div>
         </section>
-        {allowsExactSize && <section>
+        {<section>
           <h2>Printed image size</h2>
           <label className="size-toggle">
             <input type="checkbox" checked={setExactSize} onChange={event => setSetExactSize(event.target.checked)} />
@@ -695,7 +660,7 @@ function App() {
             return <div className="sheet-group" key={pageIndex}>
             <button className="sheet-select" aria-pressed={selectedSheet === pageIndex}
               onClick={() => { setSelectedId(undefined); setSelectedSheet(pageIndex) }}>
-              Sheet {pageIndex + 1} · {(sheetOrientations[pageIndex] ?? orientation) === 'portrait' ? 'Portrait' : 'Landscape'}
+              Sheet {pageIndex + 1} · {directionFor(pageIndex) === 'portrait' ? 'Portrait' : 'Landscape'}
             </button>
             <div data-sheet={pageIndex}
             className={`sheet${sheet.length ? '' : ' blank-sheet'}${selectedSheet === pageIndex ? ' active-sheet' : ''}`}
@@ -703,7 +668,7 @@ function App() {
               '--ratio': width / height, '--sheet-max': `${Math.min(800, 650 * width / height)}px`,
               '--zoom': zoom / 100,
               '--print-width': `${width}mm`, '--print-height': `${height}mm`,
-              page: `${sheetOrientations[pageIndex] ?? orientation}-sheet`,
+              page: `${directionFor(pageIndex)}-sheet`,
           } as CSSProperties}>
             {!sheet.length && <p className="empty">{photos.length ? `Sheet ${pageIndex + 1}` : 'Choose an image to see how it will print.'}</p>}
             {sheet.map((slot, index) => {
@@ -720,7 +685,7 @@ function App() {
                   aria-pressed={slot.id === selectedId} onClick={() => setSelectedId(slot.id)}>
                   <img src={slot.photo.cropped?.url ?? slot.photo.url} alt="" draggable={false} style={{
                     objectFit: slot.exactSize ? fit : 'contain',
-                    filter: sheetGrayscale[pageIndex] || slot.photo.grayscale ? 'grayscale(100%)' : undefined,
+                    filter: grayscaleFor(pageIndex) || slot.photo.grayscale ? 'grayscale(100%)' : undefined,
                     width: slot.angle % 180 ? `${slot.height / slot.width * 100}%` : '100%',
                     height: slot.angle % 180 ? `${slot.width / slot.height * 100}%` : '100%',
                     transform: `translate(-50%, -50%) rotate(${slot.angle}deg)`,
