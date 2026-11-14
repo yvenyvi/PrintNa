@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { CSSProperties, PointerEvent } from 'react'
 import { createRoot } from 'react-dom/client'
-import { distributeImages, fitImageToPaper, groupBySheet, papers, proportionalSize } from './layout'
+import { distributeImages, fitImageToPaper, groupBySheet, papers, proportionalSize, spaceAtCurrentSize } from './layout'
 import { CropEditor } from './crop'
 import type { Crop } from './crop'
 import './style.css'
@@ -66,6 +66,7 @@ function inRange(value: string, min: number, max: number) {
 
 function App() {
   const [perSheet, setPerSheet] = useState(1)
+  const [arrangeError, setArrangeError] = useState('')
   const [sheetCapacities, setSheetCapacities] = useState<Record<number, number>>({})
   const [setExactSize, setSetExactSize] = useState(false)
   const [paper, setPaper] = useState('0')
@@ -156,6 +157,7 @@ function App() {
     const dimensions = sheetSize(page)
     setEdits(previous => ({
       ...previous,
+      [item.id]: { left, top, width, height, angle, page: item.page, exactSize },
       [copy.id]: keepOnSheet({
         left: left + offset, top: top + offset, width, height, angle, page, exactSize,
       }, dimensions.width, dimensions.height),
@@ -285,8 +287,15 @@ function App() {
     (pageCount > 1 || pages[removablePage].length > 0)
   const activeSheetIsGrayscale = activePage !== undefined && Boolean(sheetGrayscale[activePage])
 
-  function distributeOnSheet(page: number, direction: 'horizontal' | 'vertical' | 'evenly') {
-    const placements = distributeImages(pages[page], sheetSize(page), edge, direction, Number(gap))
+  function distributeOnSheet(page: number, direction: 'horizontal' | 'vertical' | 'evenly' | 'keep-size') {
+    setArrangeError('')
+    const placements = direction === 'keep-size'
+      ? spaceAtCurrentSize(pages[page], sheetSize(page), edge, Number(gap))
+      : distributeImages(pages[page], sheetSize(page), edge, direction, Number(gap))
+    if (!placements.length) {
+      setArrangeError('These images don’t fit at this spacing. Move some to another sheet or reduce the spacing.')
+      return
+    }
     setEdits(previous => ({
       ...previous,
       ...Object.fromEntries(placements.map(({ id, left, top, width, height, angle }) =>
@@ -295,13 +304,48 @@ function App() {
     }))
   }
 
+  function spaceAllSheets() {
+    const layouts = pages.map((sheet, page) => spaceAtCurrentSize(sheet, sheetSize(page), edge, Number(gap)))
+    const blocked = layouts.findIndex((sheet, page) => sheet.length !== pages[page].length)
+    if (blocked !== -1) {
+      setArrangeError(`Sheet ${blocked + 1} doesn’t fit at the current sizes. Move some images to another sheet or reduce the spacing.`)
+      return
+    }
+    setArrangeError('')
+    setEdits(previous => ({
+      ...previous,
+      ...Object.fromEntries(layouts.flat().map(({ id, left, top, width, height, page, angle, exactSize }) =>
+        [id, { left, top, width, height, page, angle, exactSize }],
+      )),
+    }))
+  }
+
+  function changeCapacity(count: number) {
+    const nextDefault = selectedSheet === undefined ? count : perSheet
+    const nextOverrides = selectedSheet === undefined ? sheetCapacities : { ...sheetCapacities, [selectedSheet]: count }
+    const newGroups = groupBySheet(photos, page => nextOverrides[page] ?? nextDefault)
+    const newPages = new Map(newGroups.flatMap((sheet, page) => sheet.map(photo => [photo.id, page] as const)))
+    setEdits(previous => {
+      const updated = { ...previous }
+      groupedPhotos.forEach((sheet, page) => sheet.forEach(({ id }) => {
+        const edit = previous[id]
+        const newPage = newPages.get(id)
+        if (edit?.page === page && newPage !== undefined) updated[id] = { ...edit, page: newPage }
+      }))
+      return updated
+    })
+    setPerSheet(nextDefault)
+    setSheetCapacities(nextOverrides)
+    setArrangeError('')
+  }
+
   function changeSpacing(value: string) {
     if (value === gap) return
     setGap(value)
     if (!inRange(value, 0, 100)) return
     const placements = pages.flatMap((sheet, page) =>
       sheet.some(item => edits[item.id])
-        ? distributeImages(sheet, sheetSize(page), edge, 'evenly', Number(value))
+        ? spaceAtCurrentSize(sheet, sheetSize(page), edge, Number(value))
         : [],
     )
     setEdits(previous => ({
@@ -572,26 +616,27 @@ function App() {
             </select>
           </label>
           <div className="page-picker choices">
-            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'evenly')}>Distribute evenly</button>
+            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'keep-size')}>Space evenly · Keep size</button>
+            <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'evenly')}>Resize to fill sheet</button>
             <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'horizontal')}>Arrange in a row</button>
             <button disabled={pages[activePage].length < 2} onClick={() => distributeOnSheet(activePage, 'vertical')}>Stack vertically</button>
           </div></details>}
           <label>{selectedSheet === undefined ? 'Default images per sheet' : `Images on sheet ${selectedSheet + 1}`}
-            <select value={selectedSheet === undefined ? perSheet : capacity(selectedSheet)} onChange={event => {
-              const count = Number(event.target.value)
-              if (selectedSheet === undefined) setPerSheet(count)
-              else setSheetCapacities(previous => ({ ...previous, [selectedSheet]: count }))
-            }}>
-              <option value="1">1 image</option>
-              <option value="2">2 images</option>
-              <option value="3">3 images</option>
-              <option value="4">4 images</option>
-              <option value="5">5 images</option>
-              <option value="6">6 images</option>
-              <option value="7">7 images</option>
-              <option value="8">8 images</option>
-            </select>
+            <input key={`${selectedSheet}:${selectedSheet === undefined ? perSheet : capacity(selectedSheet)}`}
+              type="number" min={1} step={1}
+              defaultValue={selectedSheet === undefined ? perSheet : capacity(selectedSheet)}
+              onBlur={event => {
+                const count = event.currentTarget.valueAsNumber
+                if (!Number.isSafeInteger(count) || count < 1) {
+                  event.currentTarget.value = String(selectedSheet === undefined ? perSheet : capacity(selectedSheet))
+                  return
+                }
+                changeCapacity(count)
+              }}
+              onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur() }} />
           </label>
+          {printablePages.length > 1 && <button className="sheet-select" onClick={spaceAllSheets}>Space all sheets · Keep size</button>}
+          {arrangeError && <p className="error" role="alert">{arrangeError}</p>}
         </section>
         <section>
           <h2>Paper</h2>

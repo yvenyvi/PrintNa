@@ -50,6 +50,33 @@ export function proportionalSize(
   return { width: image.width * scale, height: image.height * scale }
 }
 
+export function spaceAtCurrentSize<T extends { width: number; height: number }>(
+  images: T[], paper: { width: number; height: number }, margin: number, gap: number,
+) {
+  if (!images.length) return []
+  const width = paper.width - 2 * margin
+  const height = paper.height - 2 * margin
+  const widest = Math.max(...images.map(image => image.width))
+  const tallest = Math.max(...images.map(image => image.height))
+  const maxColumns = Math.floor((width + gap) / (widest + gap) + 1e-9)
+  const maxRows = Math.floor((height + gap) / (tallest + gap) + 1e-9)
+  if (maxColumns < 1 || maxRows < 1 || images.length > maxColumns * maxRows) return []
+  const columns = Math.min(maxColumns, Math.max(Math.ceil(images.length / maxRows),
+    Math.round(Math.sqrt(images.length * width * tallest / (height * widest)))))
+  const rows = Math.ceil(images.length / columns)
+  const verticalGap = rows > 1 ? (height - rows * tallest) / (rows + 1) : (height - tallest) / 2
+  return images.map((image, index) => {
+    const row = Math.floor(index / columns)
+    const count = Math.min(columns, images.length - row * columns)
+    const horizontalGap = count > 1 ? (width - count * widest) / (count + 1) : (width - widest) / 2
+    return {
+      ...image,
+      left: margin + horizontalGap + (index % columns) * (widest + horizontalGap) + (widest - image.width) / 2,
+      top: margin + verticalGap + row * (tallest + verticalGap) + (tallest - image.height) / 2,
+    }
+  })
+}
+
 export function distributeImages<T extends { left: number; top: number; width: number; height: number }>(
   images: T[], paper: { width: number; height: number }, margin: number,
   direction: 'horizontal' | 'vertical' | 'evenly', spacing = 2,
