@@ -16,6 +16,7 @@ def main() -> None:
 
     window = webview.create_window("PrintNa", str(index), width=1200, height=850, min_size=(760, 600))
     print_lock = Lock()
+    accepted_sizes: dict[str, tuple[float, float]] = {}
 
     def open_printer_settings() -> None:
         from System import Action
@@ -34,7 +35,47 @@ def main() -> None:
         settings = PrinterSettings()
         return sorted(PrinterSettings.InstalledPrinters, key=lambda name: (name != settings.PrinterName, name))
 
+    def edit_printing_preferences(printer: str) -> dict | None:
+        from System import Action
+        from System.Drawing.Printing import PrinterSettings
+        import win32con
+        import win32print
+
+        if printer not in list_printers():
+            raise ValueError("Printer unavailable")
+        form = window.native
+        result = []
+
+        def show_preferences() -> None:
+            handle = win32print.OpenPrinter(printer)
+            try:
+                mode = win32print.GetPrinter(handle, 2)["pDevMode"]
+                flags = win32con.DM_IN_PROMPT | win32con.DM_IN_BUFFER | win32con.DM_OUT_BUFFER
+                if win32print.DocumentProperties(form.Handle.ToInt64(), handle, printer, mode, mode, flags) != 1:
+                    return
+                driver = PrinterSettings()
+                driver.PrinterName = printer
+                # Standard paper codes can coexist with stale custom dimensions.
+                paper = next((size for size in driver.PaperSizes
+                              if size.RawKind == mode.PaperSize and 0 < size.RawKind < 256), None)
+                if paper is not None:
+                    dimensions = sorted((paper.Width * 0.254, paper.Height * 0.254))
+                    dimensions = [round(value, 1) for value in dimensions]
+                elif mode.PaperWidth > 0 and mode.PaperLength > 0:
+                    dimensions = sorted((mode.PaperWidth / 10, mode.PaperLength / 10))
+                else:
+                    raise ValueError("The driver did not return paper dimensions")
+                accepted_sizes[printer] = tuple(dimensions)
+                result.append(dict(width=dimensions[0], height=dimensions[1],
+                                   landscape=mode.Orientation == 2, grayscale=mode.Color == 1))
+            finally:
+                win32print.ClosePrinter(handle)
+
+        form.Invoke(Action(show_preferences))
+        return result[0] if result else None
+
     def print_sheets(printer: str, sheets: list[dict]) -> str:
+        import win32print
         from System import Action
         from System.Drawing.Printing import PrinterSettings
         from Microsoft.Web.WebView2.Core import (
@@ -50,11 +91,22 @@ def main() -> None:
             if printer not in list_printers() or not driver.IsValid:
                 return "The selected printer is unavailable."
             supported = [sorted((size.Width * 0.254, size.Height * 0.254)) for size in driver.PaperSizes]
+            default_paper = driver.DefaultPageSettings.PaperSize
+            supported.append(sorted((default_paper.Width * 0.254, default_paper.Height * 0.254)))
+            handle = win32print.OpenPrinter(printer)
+            try:
+                mode = win32print.GetPrinter(handle, 2)["pDevMode"]
+                if mode and mode.PaperSize >= 256 and mode.PaperWidth > 0 and mode.PaperLength > 0:
+                    supported.append(sorted((mode.PaperWidth / 10, mode.PaperLength / 10)))
+            finally:
+                win32print.ClosePrinter(handle)
+            if printer in accepted_sizes:
+                supported.append(accepted_sizes[printer])
             settings = []
             for sheet in sheets:
                 width, height = float(sheet["width"]), float(sheet["height"])
                 if not any(abs(width - w) <= 0.5 and abs(height - h) <= 0.5 for w, h in supported):
-                    return f"{printer} does not list {width:g} × {height:g} mm paper. Choose a supported size or add it in the printer driver."
+                    return f"{printer} does not list {width:g} × {height:g} mm paper. Open Printing preferences to choose or define the correct size."
                 if not sheet["grayscale"] and not driver.SupportsColor:
                     return f"{printer} only supports black and white. Set the sheets to black and white or choose a color printer."
                 settings.append((width, height, bool(sheet["landscape"]), bool(sheet["grayscale"])))
@@ -95,7 +147,7 @@ def main() -> None:
         finally:
             print_lock.release()
 
-    window.expose(open_printer_settings, list_printers, print_sheets)
+    window.expose(open_printer_settings, edit_printing_preferences, list_printers, print_sheets)
     webview.start(gui="edgechromium", http_server=True)
 
 

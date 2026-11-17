@@ -13,6 +13,7 @@ type PrintSheet = { width: number; height: number; landscape: boolean; grayscale
 type PrintBridge = {
   open_printer_settings: () => Promise<void>
   list_printers: () => Promise<string[]>
+  edit_printing_preferences: (printer: string) => Promise<PrintSheet | null>
   print_sheets: (printer: string, sheets: PrintSheet[]) => Promise<string>
 }
 type Placement = { left: number; top: number; width: number; height: number; page: number; angle: number; exactSize?: boolean }
@@ -258,6 +259,8 @@ function App() {
   const [printer, setPrinter] = useState('')
   const [confirmPrint, setConfirmPrint] = useState(false)
   const [printing, setPrinting] = useState(false)
+  const [editingPreferences, setEditingPreferences] = useState(false)
+  const [preferencesApplied, setPreferencesApplied] = useState(false)
   const [printError, setPrintError] = useState('')
   const [printStatus, setPrintStatus] = useState('')
   const printDialog = useRef<HTMLDialogElement>(null)
@@ -268,6 +271,7 @@ function App() {
     if (!printBridge) return window.print()
     setPrintError('')
     setPrintStatus('')
+    setPreferencesApplied(false)
     try {
       const available = await printBridge.list_printers()
       if (!available.length) throw new Error()
@@ -276,6 +280,33 @@ function App() {
       setConfirmPrint(true)
     } catch {
       setPrintError('No Windows printer is available. Check that your printer is installed.')
+    }
+  }
+  async function applyPrinterPreferences() {
+    if (!printBridge || !printer || printing || editingPreferences) return
+    setEditingPreferences(true)
+    setPrintError('')
+    try {
+      const settings = await printBridge.edit_printing_preferences(printer)
+      if (!settings) return
+      const preset = papers.findIndex(size =>
+        Math.abs(size.width - settings.width) <= 0.25 && Math.abs(size.height - settings.height) <= 0.25,
+      )
+      if (preset === -1 && ![settings.width, settings.height].every(value => value >= 25 && value <= 600)) {
+        setPrintError('The printer returned a paper size outside PrintNa’s supported range.')
+        return
+      }
+      setPaper(preset === -1 ? 'custom' : String(preset))
+      setCustomWidth(String(settings.width))
+      setCustomHeight(String(settings.height))
+      setOrientation(settings.landscape ? 'landscape' : 'portrait')
+      setSheetOrientations({})
+      setSheetGrayscale({ 0: settings.grayscale })
+      setPreferencesApplied(true)
+    } catch {
+      setPrintError('Could not read the selected printer’s preferences.')
+    } finally {
+      setEditingPreferences(false)
     }
   }
   async function submitPrint() {
@@ -480,18 +511,28 @@ function App() {
 
   return <>
     {confirmPrint && <dialog ref={printDialog} className="crop-dialog" aria-labelledby="print-title"
-      onCancel={event => { event.preventDefault(); if (!printing) setConfirmPrint(false) }}>
+      onCancel={event => { event.preventDefault(); if (!printing && !editingPreferences) setConfirmPrint(false) }}>
       <h2 id="print-title">Print {printablePages.length} {printablePages.length === 1 ? 'sheet' : 'sheets'}</h2>
       <label>Printer
-        <select value={printer} disabled={printing} onChange={event => setPrinter(event.target.value)}>
+        <select value={printer} disabled={printing || editingPreferences} onChange={event => {
+          setPrinter(event.target.value)
+          setPreferencesApplied(false)
+          setPrintError('')
+        }}>
           {printers.map(name => <option key={name}>{name}</option>)}
         </select>
       </label>
       <p className="hint">{paper === 'custom' ? 'Custom paper' : papers[Number(paper)].name} · 100% scale</p>
+      <button className="sheet-select" type="button" disabled={printing || editingPreferences || !printer}
+        onClick={applyPrinterPreferences}>{editingPreferences ? 'Opening preferences…' : 'Printing preferences'}</button>
+      {preferencesApplied && <p className="hint" role="status">
+        Applied to all sheets: {short} × {long} mm · {orientation} · {grayscaleFor(0) ? 'Black and white' : 'Color'}.
+      </p>}
+      {!canPrint && <p className="error">The layout does not fit the selected paper. Close this window to adjust it.</p>}
       {printError && <p role="alert" className="error">{printError}</p>}
       <div className="crop-actions">
-        <button className="sheet-select" disabled={printing} onClick={() => setConfirmPrint(false)}>Cancel</button>
-        <button className="print-button" disabled={printing || !canPrint} onClick={submitPrint}>{printing ? 'Sending…' : 'Print'}</button>
+        <button className="sheet-select" disabled={printing || editingPreferences} onClick={() => setConfirmPrint(false)}>Close</button>
+        <button className="print-button" disabled={printing || editingPreferences || !canPrint} onClick={submitPrint}>{printing ? 'Sending…' : 'Print'}</button>
       </div>
     </dialog>}
     <style media="print">{`@page { margin: 0; }
