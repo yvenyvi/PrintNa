@@ -1,5 +1,6 @@
 export const papers = [
   { name: 'A4', width: 210, height: 297 },
+  { name: 'B5 (185 × 260 mm)', width: 185, height: 260 },
   { name: 'Letter', width: 215.9, height: 279.4 },
   { name: 'Legal', width: 215.9, height: 355.6 },
   { name: 'Folio (8.5 × 13 in)', width: 215.9, height: 330.2 },

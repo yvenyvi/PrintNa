@@ -4,10 +4,17 @@ import { createRoot } from 'react-dom/client'
 import { distributeImages, findImageSpace, fitImageToPaper, papers, proportionalSize, spaceAtCurrentSize } from './layout'
 import { CropEditor } from './crop'
 import type { Crop } from './crop'
+import { readPdf } from './pdfImport'
 import './style.css'
 
 type Photo = { id: string; name: string; url: string; width: number; height: number; grayscale?: boolean; keepProportions?: boolean;
-  cropped?: { crop: Crop; url: string; width: number; height: number } }
+  cropped?: { crop: Crop; url: string; width: number; height: number }; pdfSize?: { width: number; height: number } }
+type PrintSheet = { width: number; height: number; landscape: boolean; grayscale: boolean }
+type PrintBridge = {
+  open_printer_settings: () => Promise<void>
+  list_printers: () => Promise<string[]>
+  print_sheets: (printer: string, sheets: PrintSheet[]) => Promise<string>
+}
 type Placement = { left: number; top: number; width: number; height: number; page: number; angle: number; exactSize?: boolean }
 type Orientation = 'portrait' | 'landscape'
 type Item = Placement & { id: string; photo: Photo; exactSize: boolean }
@@ -83,6 +90,7 @@ function App() {
   const [gap, setGap] = useState('2')
   const [fit, setFit] = useState<'cover' | 'contain'>('contain')
   const [photos, setPhotos] = useState<Photo[]>([])
+  const [importing, setImporting] = useState(false)
   const [fileError, setFileError] = useState('')
   const [selectedId, setSelectedId] = useState<string>()
   const [cropping, setCropping] = useState(false)
@@ -113,10 +121,18 @@ function App() {
 
   async function openPhotos(files: FileList) {
     const request = ++fileRequest.current
+    setImporting(true)
     setFileError('')
     const next: Photo[] = []
     try {
       for (const file of Array.from(files)) {
+        if (/\.pdf$/i.test(file.name)) {
+          await readPdf(file, (blob, width, height, page, pixels) => next.push({
+            id: String(nextPhotoId.current++), name: `${file.name} · page ${page}`,
+            url: URL.createObjectURL(blob), ...pixels, pdfSize: { width, height },
+          }))
+          continue
+        }
         if (!/\.(jpg|jpeg|png)$/i.test(file.name)) throw new Error()
         const photo = { id: String(nextPhotoId.current++), name: file.name, url: URL.createObjectURL(file), width: 0, height: 0 }
         next.push(photo)
@@ -128,8 +144,10 @@ function App() {
       }
     } catch {
       next.forEach(photo => URL.revokeObjectURL(photo.url))
-      if (request === fileRequest.current) setFileError('Choose a JPG or PNG image that can be opened.')
+      if (request === fileRequest.current) setFileError('Choose a readable PDF, JPG, or PNG. Unlock password-protected PDFs before importing.')
       return
+    } finally {
+      if (request === fileRequest.current) setImporting(false)
     }
     if (request !== fileRequest.current) {
       next.forEach(photo => URL.revokeObjectURL(photo.url))
@@ -194,13 +212,14 @@ function App() {
   let currentPage = 0
   if (settingsValid) for (const photo of photos) {
     const edit = edits[photo.id]
-    let page = edit ? edit.page : currentPage
+    let page = edit ? edit.page : currentPage + (photo.pdfSize && pages[currentPage]?.length ? 1 : 0)
     for (;;) {
       const paper = sheetSize(page)
       const useExactSize = edit?.exactSize ?? exactSize
       const source = photo.cropped ?? photo
       const dimensions = edit ?? (useExactSize ? { width: Number(photoWidth), height: Number(photoHeight) }
-        : fitImageToPaper(source.width * millimetersPerImagePixel, source.height * millimetersPerImagePixel,
+        : fitImageToPaper(photo.pdfSize?.width ?? source.width * millimetersPerImagePixel,
+          photo.pdfSize?.height ?? source.height * millimetersPerImagePixel,
           paper.width - 2 * edge, paper.height - 2 * edge))
       if (!dimensions || dimensions.width > paper.width - 2 * edge + 1e-7 ||
         dimensions.height > paper.height - 2 * edge + 1e-7) {
@@ -209,7 +228,7 @@ function App() {
       }
       const sheet = pages[page] ?? []
       const limit = capacity(page)
-      const position = !limit || sheet.length < limit
+      const position = (!limit || sheet.length < limit) && (edit || !sheet.some(item => item.photo.pdfSize))
         ? (edit && edit.left >= 0 && page === edit.page
           ? keepOnSheet(edit, paper.width, paper.height, edge)
           : findImageSpace(dimensions, sheet, paper, edge, space))
@@ -231,15 +250,58 @@ function App() {
   const selectedSize = sheetSize(selected?.page ?? 0)
   const printablePages = pages.filter(sheet => sheet.length > 0)
   const canPrint = settingsValid && fits && printablePages.length > 0
-  const print = () => window.print()
-  const [printerSettings, setPrinterSettings] = useState<(() => Promise<void>) | undefined>()
+  const [printBridge, setPrintBridge] = useState<PrintBridge>()
+  const [printers, setPrinters] = useState<string[]>([])
+  const [printer, setPrinter] = useState('')
+  const [confirmPrint, setConfirmPrint] = useState(false)
+  const [printing, setPrinting] = useState(false)
   const [printError, setPrintError] = useState('')
+  const [printStatus, setPrintStatus] = useState('')
+  const printDialog = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    if (confirmPrint) printDialog.current?.showModal()
+  }, [confirmPrint])
+  async function print() {
+    if (!printBridge) return window.print()
+    setPrintError('')
+    setPrintStatus('')
+    try {
+      const available = await printBridge.list_printers()
+      if (!available.length) throw new Error()
+      setPrinters(available)
+      setPrinter(current => available.includes(current) ? current : available[0])
+      setConfirmPrint(true)
+    } catch {
+      setPrintError('No Windows printer is available. Check that your printer is installed.')
+    }
+  }
+  async function submitPrint() {
+    if (!printBridge || !printer || printing) return
+    setPrinting(true)
+    setPrintError('')
+    try {
+      const sheets = pages.flatMap((sheet, index) => sheet.length ? [{
+        width: short, height: long, landscape: directionFor(index) === 'landscape',
+        grayscale: grayscaleFor(index) || sheet.every(item => item.photo.grayscale),
+      }] : [])
+      const error = await printBridge.print_sheets(printer, sheets)
+      if (error) setPrintError(error)
+      else {
+        setConfirmPrint(false)
+        setPrintStatus('Sent to printer.')
+      }
+    } catch {
+      setPrintError('Windows could not submit the print job.')
+    } finally {
+      setPrinting(false)
+    }
+  }
   useEffect(() => {
     function readPrintBridge() {
       const host = window as Window & {
-        pywebview?: { api?: { open_printer_settings?: () => Promise<void> } }
+        pywebview?: { api?: PrintBridge }
       }
-      setPrinterSettings(() => host.pywebview?.api?.open_printer_settings)
+      if (host.pywebview?.api?.print_sheets) setPrintBridge(host.pywebview.api)
     }
     window.addEventListener('pywebviewready', readPrintBridge)
     readPrintBridge()
@@ -414,6 +476,21 @@ function App() {
   }
 
   return <>
+    {confirmPrint && <dialog ref={printDialog} className="crop-dialog" aria-labelledby="print-title"
+      onCancel={event => { event.preventDefault(); if (!printing) setConfirmPrint(false) }}>
+      <h2 id="print-title">Print {printablePages.length} {printablePages.length === 1 ? 'sheet' : 'sheets'}</h2>
+      <label>Printer
+        <select value={printer} disabled={printing} onChange={event => setPrinter(event.target.value)}>
+          {printers.map(name => <option key={name}>{name}</option>)}
+        </select>
+      </label>
+      <p className="hint">{paper === 'custom' ? 'Custom paper' : papers[Number(paper)].name} · 100% scale</p>
+      {printError && <p role="alert" className="error">{printError}</p>}
+      <div className="crop-actions">
+        <button className="sheet-select" disabled={printing} onClick={() => setConfirmPrint(false)}>Cancel</button>
+        <button className="print-button" disabled={printing || !canPrint} onClick={submitPrint}>{printing ? 'Sending…' : 'Print'}</button>
+      </div>
+    </dialog>}
     <style media="print">{`@page { margin: 0; }
       @page portrait-sheet { size: ${short}mm ${long}mm; }
       @page landscape-sheet { size: ${long}mm ${short}mm; }`}</style>
@@ -422,10 +499,10 @@ function App() {
         <strong>PrintNa</strong><p>Resize. Arrange. Print.</p>
       </div></div>
       <div className="print-actions">
-        {printerSettings && <button className="sheet-select" disabled={!canPrint} onClick={async () => {
+        {printBridge && <button className="sheet-select" disabled={!canPrint || printing} onClick={async () => {
           setPrintError('')
           try {
-            await printerSettings()
+            await printBridge.open_printer_settings()
           } catch {
             setPrintError('Windows printer settings could not open. Use Print sheet to open print preview.')
           }
@@ -553,8 +630,8 @@ function App() {
         <section>
           <h2>Images</h2>
           <label className="file-picker">
-            {photos.length ? 'Add more images' : 'Choose images'}
-            <input type="file" aria-label="Choose images" accept=".jpg,.jpeg,.png" multiple
+            {importing ? 'Opening files…' : photos.length ? 'Add images or PDFs' : 'Choose images or PDFs'}
+            <input type="file" aria-label="Choose images or PDFs" accept=".jpg,.jpeg,.png,.pdf" multiple disabled={importing}
               onChange={event => {
                 if (event.target.files?.length) void openPhotos(event.target.files)
                 event.target.value = ''
@@ -699,10 +776,11 @@ function App() {
           })}
         </div>
         <p className={printError || !settingsValid || !fits ? 'preview-note error' : 'preview-note'} role="status">
-          {printError || (!settingsValid ? 'Check the sizes and spacing you entered.'
+          {printError || printStatus || (!settingsValid ? 'Check the sizes and spacing you entered.'
             : !fits
               ? 'The images won’t fit. Try a larger sheet, smaller images, or less spacing.'
-            : 'In the print window, match the paper size and choose Actual size or 100%.')}
+            : printBridge ? 'PrintNa uses the paper and layout settings shown here.'
+              : 'In the print window, match the paper size and choose Actual size or 100%.')}
         </p>
         <div className="preview-header">
           <div className="preview-section preview-tools">
