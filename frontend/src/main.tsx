@@ -34,8 +34,8 @@ function keepOnSheet(item: Placement, width: number, height: number, edge = 0): 
   }
 }
 
-type Unit = 'cm' | 'in'
-const millimetersPerUnit = { cm: 10, in: 25.4 }
+type Unit = 'mm' | 'cm' | 'in'
+const millimetersPerUnit = { mm: 1, cm: 10, in: 25.4 }
 const millimetersPerImagePixel = 25.4 / 96
 
 function displaySize(mm: number, unit: Unit) {
@@ -521,6 +521,7 @@ function App() {
           <label>Measurement unit
             <select value={unit} onChange={event => setUnit(event.target.value as Unit)}>
               <option value="cm">Centimeters (cm)</option>
+              <option value="mm">Millimeters (mm)</option>
               <option value="in">Inches (in)</option>
             </select>
           </label>
