@@ -32,10 +32,13 @@ export function groupBySheet<T>(images: T[], capacity: (page: number) => number)
   return sheets
 }
 
-export function fitImageToPaper(width: number, height: number, availableWidth: number, availableHeight: number) {
+export function fitImageToPaper(
+  width: number, height: number, availableWidth: number, availableHeight: number, allowEnlarging = false,
+) {
   if (width <= 0 || height <= 0 || availableWidth <= 0 || availableHeight <= 0) return null
 
-  const scale = Math.min(1, availableWidth / width, availableHeight / height)
+  const fitScale = Math.min(availableWidth / width, availableHeight / height)
+  const scale = allowEnlarging ? fitScale : Math.min(1, fitScale)
   return { width: width * scale, height: height * scale, scaledDown: scale < 1 }
 }
 

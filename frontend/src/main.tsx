@@ -215,12 +215,13 @@ function App() {
     let page = edit ? edit.page : currentPage + (photo.pdfSize && pages[currentPage]?.length ? 1 : 0)
     for (;;) {
       const paper = sheetSize(page)
-      const useExactSize = edit?.exactSize ?? exactSize
+      const autoFitPdf = Boolean(photo.pdfSize && !edit)
+      const useExactSize = edit?.exactSize ?? (exactSize && !autoFitPdf)
       const source = photo.cropped ?? photo
       const dimensions = edit ?? (useExactSize ? { width: Number(photoWidth), height: Number(photoHeight) }
         : fitImageToPaper(photo.pdfSize?.width ?? source.width * millimetersPerImagePixel,
           photo.pdfSize?.height ?? source.height * millimetersPerImagePixel,
-          paper.width - 2 * edge, paper.height - 2 * edge))
+          paper.width - 2 * edge, paper.height - 2 * edge, autoFitPdf))
       if (!dimensions || dimensions.width > paper.width - 2 * edge + 1e-7 ||
         dimensions.height > paper.height - 2 * edge + 1e-7) {
         fits = false
@@ -231,7 +232,9 @@ function App() {
       const position = (!limit || sheet.length < limit) && (edit || !sheet.some(item => item.photo.pdfSize))
         ? (edit && edit.left >= 0 && page === edit.page
           ? keepOnSheet(edit, paper.width, paper.height, edge)
-          : findImageSpace(dimensions, sheet, paper, edge, space))
+          : autoFitPdf && sheet.length === 0
+            ? { left: (paper.width - dimensions.width) / 2, top: (paper.height - dimensions.height) / 2 }
+            : findImageSpace(dimensions, sheet, paper, edge, space))
         : null
       if (position) {
         sheet.push({ id: photo.id, photo, page, exactSize: useExactSize, angle: edit?.angle ?? 0,
